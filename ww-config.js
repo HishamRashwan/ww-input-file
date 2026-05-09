@@ -1,9 +1,19 @@
 export default {
     editor: {
-        label: 'File Upload',
+        label: 'Supabase File Upload',
         icon: 'upload',
         bubble: { icon: 'upload' },
         customSettingsPropertiesOrder: [
+            {
+                label: 'Supabase',
+                isCollapsible: true,
+                properties: ['supabaseUrl', 'supabaseAnonKey', 'supabaseBucket', 'supabasePath'],
+            },
+            {
+                label: 'Supabase upload',
+                isCollapsible: true,
+                properties: ['autoUpload', 'useOriginalFileName', 'upsert', 'returnPublicUrls', 'cacheControl', 'uploadTimeoutSeconds'],
+            },
             // UX properties
             'type',
             'reorder',
@@ -181,8 +191,54 @@ export default {
         {
             name: 'change',
             label: { en: 'On change' },
-            event: { value: [] },
+            event: {
+                value: [],
+                status: {},
+                uploadProgress: 0,
+                isUploading: false,
+                isUploaded: false,
+                files: [],
+                filesJson: '',
+                fileNames: '',
+                filePaths: '',
+            },
             default: true,
+        },
+        {
+            name: 'upload-start',
+            label: { en: 'On upload start' },
+            event: { value: [], status: {} },
+        },
+        {
+            name: 'upload-progress',
+            label: { en: 'On upload progress' },
+            event: { file: {}, progress: {}, status: {} },
+        },
+        {
+            name: 'upload-success',
+            label: { en: 'On upload success' },
+            event: {
+                file: {},
+                response: {
+                    name: '',
+                    path: '',
+                    fullPath: '',
+                    bucket: '',
+                    publicUrl: '',
+                },
+            },
+        },
+        {
+            name: 'complete',
+            label: { en: 'On upload complete' },
+            event: {
+                successful: [],
+                failed: [],
+                files: [],
+                filesJson: '',
+                fileNames: '',
+                filePaths: '',
+            },
         },
         {
             name: 'initValueChange',
@@ -204,8 +260,86 @@ export default {
             action: 'clearFiles',
             args: [],
         },
+        {
+            label: { en: 'Start Uploading' },
+            action: 'startUploading',
+            args: [],
+        },
     ],
     properties: {
+        supabaseUrl: {
+            label: { en: 'Supabase project URL' },
+            type: 'Text',
+            section: 'settings',
+            defaultValue: '',
+            bindable: true,
+            options: { placeholder: 'https://project-ref.supabase.co' },
+        },
+        supabaseAnonKey: {
+            label: { en: 'Supabase anon key' },
+            type: 'Text',
+            section: 'settings',
+            defaultValue: '',
+            bindable: true,
+        },
+        supabaseBucket: {
+            label: { en: 'Bucket name' },
+            type: 'Text',
+            section: 'settings',
+            defaultValue: '',
+            bindable: true,
+        },
+        supabasePath: {
+            label: { en: 'Folder path' },
+            type: 'Text',
+            section: 'settings',
+            defaultValue: '',
+            bindable: true,
+            options: { placeholder: 'uploads/users' },
+        },
+        autoUpload: {
+            label: { en: 'Upload after selection' },
+            type: 'OnOff',
+            section: 'settings',
+            defaultValue: true,
+            bindable: true,
+        },
+        useOriginalFileName: {
+            label: { en: 'Keep original file names' },
+            type: 'OnOff',
+            section: 'settings',
+            defaultValue: false,
+            bindable: true,
+        },
+        upsert: {
+            label: { en: 'Overwrite files with same path' },
+            type: 'OnOff',
+            section: 'settings',
+            defaultValue: false,
+            bindable: true,
+        },
+        returnPublicUrls: {
+            label: { en: 'Return public URLs' },
+            type: 'OnOff',
+            section: 'settings',
+            defaultValue: false,
+            bindable: true,
+        },
+        cacheControl: {
+            label: { en: 'Cache control seconds' },
+            type: 'Text',
+            section: 'settings',
+            defaultValue: '3600',
+            bindable: true,
+        },
+        uploadTimeoutSeconds: {
+            label: { en: 'Upload timeout seconds' },
+            type: 'Number',
+            options: { min: 0 },
+            section: 'settings',
+            defaultValue: 300,
+            bindable: true,
+        },
         type: {
             label: { en: 'Upload type' },
             type: 'TextSelect',

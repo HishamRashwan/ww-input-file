@@ -49,8 +49,9 @@ export default {
     emits: ['remove'],
     setup(props) {
         const getFileStatus = file => {
-            if (!file?.name || !props.status) return {};
-            return props.status[file.name] || {};
+            const statusKey = file?.id || file?.name;
+            if (!statusKey || !props.status) return {};
+            return props.status[statusKey] || {};
         };
 
         return {

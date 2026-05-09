@@ -7,9 +7,9 @@
             'ww-file-upload--readonly': isReadonly,
             'ww-file-upload--has-files': hasFiles,
         }"
-        @dragover.prevent="handleDragOver"
-        @dragleave.prevent="handleDragLeave"
-        @drop.prevent="handleDrop"
+        @dragover="handleDragOver"
+        @dragleave="handleDragLeave"
+        @drop="handleDrop"
         role="region"
         aria-label="File upload area"
     >
@@ -80,9 +80,9 @@
 </template>
 
 <script>
-import { ref, computed, watch, provide, inject } from 'vue';
+import { ref, computed, watch, provide, inject, onBeforeUnmount } from 'vue';
 import FileList from './components/FileList.vue';
-import { validateFile } from './utils/fileValidation';
+import { getFileExtension, validateFile } from './utils/fileValidation';
 import { fileToBase64, fileToBinary } from './utils/fileProcessing';
 import { useDragAnimation } from './composables/useDragAnimation';
 
@@ -126,6 +126,9 @@ export default {
         const circleEl = ref(null);
         const iconText = ref(null);
         const isProcessing = ref(false);
+        const isUploading = ref(false);
+        const activeUploads = ref({});
+        const activeUploadProgress = ref({});
 
         const extensionsMessage = computed(() => props.content?.extensionsMessage || null);
         const maxFileMessage = computed(() => props.content?.maxFileMessage || null);
@@ -141,6 +144,7 @@ export default {
         const required = computed(() => props.content?.required || false);
         const extensions = computed(() => props.content?.extensions || 'any');
         const customExtensions = computed(() => props.content?.customExtensions || '');
+        const autoUpload = computed(() => props.content?.autoUpload !== false);
         const exposeBase64 = computed(() => props.content?.exposeBase64 || false);
         const exposeBinary = computed(() => props.content?.exposeBinary || false);
         const showUploadIcon = computed(() => props.content?.showUploadIcon !== false);
@@ -265,12 +269,15 @@ export default {
 
         const fileList = computed(() => (Array.isArray(files.value) ? files.value : []));
         const hasFiles = computed(() => fileList.value.length > 0);
+        const hasSupabaseConfig = computed(
+            () => props.content?.supabaseUrl && props.content?.supabaseAnonKey && props.content?.supabaseBucket
+        );
 
         watch([status, fileList], ([newStatus, newFiles]) => {
             if (newStatus && typeof newStatus === 'object') {
-                const fileNames = newFiles.map(file => file.name);
+                const fileKeys = newFiles.map(file => file.id || file.name);
                 const updatedStatus = Object.fromEntries(
-                    Object.entries(newStatus).filter(([key]) => fileNames.includes(key))
+                    Object.entries(newStatus).filter(([key]) => fileKeys.includes(key))
                 );
 
                 if (Object.keys(updatedStatus).length !== Object.keys(newStatus).length) {
@@ -280,7 +287,8 @@ export default {
         });
 
         const getFileStatus = file => {
-            if (!status.value || !file.name || !status.value[file.name]) {
+            const statusKey = file?.id || file?.name;
+            if (!status.value || !statusKey || !status.value[statusKey]) {
                 return {
                     uploadProgress: 0,
                     isUploading: false,
@@ -288,7 +296,7 @@ export default {
                 };
             }
 
-            return status.value[file.name];
+            return status.value[statusKey];
         };
 
         const acceptedFileTypes = computed(() => {
@@ -366,6 +374,17 @@ export default {
                     });
                 }),
                 status: status,
+                uploadProgress: computed(() => {
+                    if (!fileList.value.length) return 0;
+                    const average =
+                        fileList.value.reduce((total, file) => {
+                            const fileStatus = status.value?.[file.id || file.name] || {};
+                            return total + (fileStatus.uploadProgress || 0);
+                        }, 0) / fileList.value.length;
+                    return Number(average.toFixed(1));
+                }),
+                isUploading,
+                isUploaded: computed(() => Boolean(fileList.value.length) && fileList.value.every(file => file.isUploaded)),
             },
         });
 
@@ -410,6 +429,10 @@ export default {
         };
 
         const handleDrop = async event => {
+            if (isDisabled.value || isReadonly.value || !drop.value || isEditing.value) return;
+            event.preventDefault();
+            event.stopPropagation();
+
             const animationHandled = animationHandleDrop(event);
             if (!animationHandled || isDisabled.value || isReadonly.value || !drop.value) return;
 
@@ -430,6 +453,58 @@ export default {
             event.target.value = '';
         };
 
+        const emitWorkflowEvent = (name, event) => {
+            emit('trigger-event', { name, event });
+        };
+
+        const serializeFile = file => ({
+            id: file.id,
+            name: file.name,
+            size: file.size,
+            type: file.type,
+            extension: file.extension || getFileExtension(file.name, file.type),
+            path: file.path || null,
+            fullPath: file.fullPath || null,
+            publicUrl: file.publicUrl || null,
+            bucket: file.bucket || null,
+            isUploaded: Boolean(file.isUploaded),
+        });
+
+        const createWorkflowPayload = (sourceFiles = fileList.value) => {
+            const value = sourceFiles.map(serializeFile);
+            const uploadedFiles = value
+                .filter(file => file.path)
+                .map(file => ({
+                    name: file.name,
+                    path: file.path,
+                    fullPath: file.fullPath,
+                    publicUrl: file.publicUrl,
+                }));
+            const statusValue = status.value || {};
+            const uploadProgress = value.length
+                ? value.reduce((total, file) => {
+                      const fileStatus = statusValue[file.id] || statusValue[file.name] || {};
+                      return total + (fileStatus.uploadProgress || 0);
+                  }, 0) / value.length
+                : 0;
+
+            return {
+                value,
+                status: statusValue,
+                uploadProgress: Number(uploadProgress.toFixed(1)),
+                isUploading: isUploading.value,
+                isUploaded: Boolean(value.length) && value.every(file => file.isUploaded),
+                files: uploadedFiles,
+                filesJson: JSON.stringify(uploadedFiles),
+                fileNames: uploadedFiles.map(file => file.name).join(', '),
+                filePaths: uploadedFiles.map(file => file.path).join(', '),
+            };
+        };
+
+        const emitChange = sourceFiles => {
+            emitWorkflowEvent('change', createWorkflowPayload(sourceFiles));
+        };
+
         const processFiles = async fileList => {
             isProcessing.value = true;
             const filesToProcess = Array.from(fileList);
@@ -437,15 +512,12 @@ export default {
             // Single mode handling
             if (type.value === 'single') {
                 if (filesToProcess.length > 1) {
-                    emit('trigger-event', {
-                        name: 'error',
-                        event: {
-                            code: 'SINGLE_MODE_MULTIPLE_FILES',
-                            data: {
-                                message: 'Multiple files provided in single file mode',
-                                count: filesToProcess.length,
-                                acceptedCount: 1,
-                            },
+                    emitWorkflowEvent('error', {
+                        code: 'SINGLE_MODE_MULTIPLE_FILES',
+                        data: {
+                            message: 'Multiple files provided in single file mode',
+                            count: filesToProcess.length,
+                            acceptedCount: 1,
                         },
                     });
                 }
@@ -458,15 +530,12 @@ export default {
             if (type.value === 'multi' && maxFiles.value > 0) {
                 availableSlots = maxFiles.value - files.value.length;
                 if (availableSlots <= 0) {
-                    emit('trigger-event', {
-                        name: 'error',
-                        event: {
-                            code: 'MAX_FILES_REACHED',
-                            data: {
-                                message: `Maximum number of files (${maxFiles.value}) reached`,
-                                maxFiles: maxFiles.value,
-                                currentCount: files.value.length,
-                            },
+                    emitWorkflowEvent('error', {
+                        code: 'MAX_FILES_REACHED',
+                        data: {
+                            message: `Maximum number of files (${maxFiles.value}) reached`,
+                            maxFiles: maxFiles.value,
+                            currentCount: files.value.length,
                         },
                     });
 
@@ -478,17 +547,14 @@ export default {
                     isProcessing.value = false;
                     return;
                 } else if (filesToProcess.length > availableSlots) {
-                    emit('trigger-event', {
-                        name: 'error',
-                        event: {
-                            code: 'TOO_MANY_FILES',
-                            data: {
-                                message: `Only ${availableSlots} more files can be added`,
-                                providedCount: filesToProcess.length,
-                                availableSlots: availableSlots,
-                                maxFiles: maxFiles.value,
-                                currentCount: files.value.length,
-                            },
+                    emitWorkflowEvent('error', {
+                        code: 'TOO_MANY_FILES',
+                        data: {
+                            message: `Only ${availableSlots} more files can be added`,
+                            providedCount: filesToProcess.length,
+                            availableSlots: availableSlots,
+                            maxFiles: maxFiles.value,
+                            currentCount: files.value.length,
                         },
                     });
                 }
@@ -522,17 +588,14 @@ export default {
                     processedFiles.push(file);
                 } else {
                     console.warn(`File validation failed: ${validationResult.reason}`);
-                    emit('trigger-event', {
-                        name: 'error',
-                        event: {
-                            code: 'VALIDATION_ERROR',
-                            data: {
-                                message: validationResult.reason,
-                                fileName: file.name,
-                                fileSize: file.size,
-                                fileType: file.type,
-                                constraint: validationResult.constraint,
-                            },
+                    emitWorkflowEvent('error', {
+                        code: 'VALIDATION_ERROR',
+                        data: {
+                            message: validationResult.reason,
+                            fileName: file.name,
+                            fileSize: file.size,
+                            fileType: file.type,
+                            constraint: validationResult.constraint,
                         },
                     });
 
@@ -548,10 +611,8 @@ export default {
             if (processedFiles.length > 0) {
                 if (type.value === 'single') {
                     setFiles(processedFiles);
-                    emit('trigger-event', {
-                        name: 'change',
-                        event: { value: processedFiles },
-                    });
+                    emitChange(processedFiles);
+                    if (autoUpload.value) startUploading(processedFiles);
                     isProcessing.value = false;
                 } else {
                     const currentFiles = [...files.value];
@@ -564,10 +625,8 @@ export default {
                         if (index < processedFiles.length - 1) {
                             setTimeout(() => addNextFile(index + 1), 150);
                         } else {
-                            emit('trigger-event', {
-                                name: 'change',
-                                event: { value: newFiles },
-                            });
+                            emitChange(newFiles);
+                            if (autoUpload.value) startUploading(newFiles);
                             isProcessing.value = false;
                         }
                     };
@@ -581,16 +640,286 @@ export default {
             isProcessing.value = false;
         };
 
+        const updateFileStatus = (file, patch) => {
+            const key = file.id || file.name;
+            setStatus({
+                ...(status.value || {}),
+                [key]: {
+                    uploadProgress: 0,
+                    isUploading: false,
+                    isUploaded: false,
+                    ...(status.value?.[key] || {}),
+                    ...patch,
+                    name: file.name,
+                },
+            });
+        };
+
+        const pruneStatus = nextFiles => {
+            const allowedKeys = nextFiles.map(file => file.id || file.name);
+            const nextStatus = Object.fromEntries(
+                Object.entries(status.value || {}).filter(([key]) => allowedKeys.includes(key))
+            );
+            setStatus(nextStatus);
+        };
+
+        const startUploading = async (sourceFiles = fileList.value) => {
+            if (isDisabled.value || isReadonly.value || isUploading.value) return;
+
+            const pendingFiles = sourceFiles.filter(file => !file.isUploaded);
+            if (!pendingFiles.length) return;
+
+            if (!hasSupabaseConfig.value) {
+                emitWorkflowEvent('error', {
+                    code: 'SUPABASE_CONFIG_MISSING',
+                    data: { message: 'Add Supabase URL, anon key, and bucket before uploading.' },
+                });
+                return;
+            }
+
+            isUploading.value = true;
+            emitWorkflowEvent('upload-start', createWorkflowPayload());
+
+            const bucket = String(props.content.supabaseBucket || '').trim();
+            const successful = [];
+            const failed = [];
+
+            for (const file of pendingFiles) {
+                try {
+                    const path = createStoragePath(file);
+                    const response = await uploadFileToSupabase(file, bucket, path);
+                    const result = {
+                        id: file.id,
+                        name: file.name,
+                        path: response.path || path,
+                        fullPath: response.fullPath || `${bucket}/${response.path || path}`,
+                        bucket,
+                        size: file.size,
+                        type: file.type,
+                        publicUrl: props.content.returnPublicUrls ? getPublicUrl(bucket, response.path || path) : null,
+                    };
+
+                    Object.assign(file, result, { isUploaded: true });
+                    updateFileStatus(file, {
+                        uploadProgress: 100,
+                        isUploading: false,
+                        isUploaded: true,
+                        path: result.path,
+                        publicUrl: result.publicUrl,
+                    });
+                    successful.push(result);
+                    emitWorkflowEvent('upload-success', { file: serializeFile(file), response: result });
+                    emitChange();
+                } catch (error) {
+                    updateFileStatus(file, {
+                        isUploading: false,
+                        isUploaded: false,
+                        error: error.message,
+                    });
+                    failed.push({ file: serializeFile(file), message: error.message, name: error.name });
+                    emitWorkflowEvent('error', {
+                        code: error.name || 'SUPABASE_UPLOAD_ERROR',
+                        data: { message: error.message, fileName: file.name },
+                    });
+                    emitChange();
+                }
+            }
+
+            isUploading.value = false;
+            emitChange(sourceFiles);
+            emitWorkflowEvent('complete', {
+                ...createWorkflowPayload(sourceFiles),
+                successful,
+                failed,
+            });
+        };
+
+        const uploadFileToSupabase = (file, bucket, path) =>
+            new Promise((resolve, reject) => {
+                const xhr = new XMLHttpRequest();
+                const timeoutSeconds = toNonNegativeNumber(props.content.uploadTimeoutSeconds, 300);
+                const url = createSupabaseObjectUrl(bucket, path);
+                const key = file.id || file.name;
+
+                activeUploads.value[key] = xhr;
+                activeUploadProgress.value[key] = { loaded: 0, total: file.size, percentage: 0 };
+
+                updateFileStatus(file, {
+                    uploadProgress: 0,
+                    isUploading: true,
+                    isUploaded: false,
+                    error: null,
+                });
+                emitChange();
+
+                xhr.open('POST', url);
+                xhr.timeout = timeoutSeconds ? timeoutSeconds * 1000 : 0;
+                xhr.setRequestHeader('apikey', String(props.content.supabaseAnonKey || '').trim());
+                xhr.setRequestHeader('Authorization', `Bearer ${String(props.content.supabaseAnonKey || '').trim()}`);
+                xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+                xhr.setRequestHeader('Cache-Control', String(props.content.cacheControl || '3600'));
+                xhr.setRequestHeader('x-upsert', props.content.upsert ? 'true' : 'false');
+
+                xhr.upload.onprogress = event => {
+                    if (!event.lengthComputable) return;
+
+                    const percentage = Math.min(99, (event.loaded / event.total) * 100);
+                    activeUploadProgress.value[key] = {
+                        loaded: event.loaded,
+                        total: event.total,
+                        percentage,
+                    };
+                    updateFileStatus(file, {
+                        uploadProgress: Number(Math.max(0.1, percentage).toFixed(1)),
+                        isUploading: true,
+                        bytesUploaded: event.loaded,
+                        bytesTotal: event.total,
+                    });
+                    emitWorkflowEvent('upload-progress', {
+                        file: serializeFile(file),
+                        progress: status.value?.[key] || {},
+                        status: status.value,
+                    });
+                    emitChange();
+                };
+
+                xhr.onload = () => {
+                    delete activeUploads.value[key];
+                    delete activeUploadProgress.value[key];
+
+                    let response = {};
+                    try {
+                        response = xhr.responseText ? JSON.parse(xhr.responseText) : {};
+                    } catch (error) {
+                        response = {};
+                    }
+
+                    if (xhr.status >= 200 && xhr.status < 300) {
+                        resolve({
+                            path: response.Key ? response.Key.replace(`${bucket}/`, '') : path,
+                            fullPath: response.Key || `${bucket}/${path}`,
+                        });
+                        return;
+                    }
+
+                    reject(
+                        new Error(
+                            response.message || response.error || `Supabase upload failed with status ${xhr.status}.`
+                        )
+                    );
+                };
+
+                xhr.onerror = () => {
+                    const progress = formatUploadProgressForError(key);
+                    delete activeUploads.value[key];
+                    delete activeUploadProgress.value[key];
+                    reject(new Error(`Supabase upload failed because of a network error. ${progress}`));
+                };
+
+                xhr.ontimeout = () => {
+                    const progress = formatUploadProgressForError(key);
+                    delete activeUploads.value[key];
+                    delete activeUploadProgress.value[key];
+                    reject(new Error(`Supabase upload timed out after ${timeoutSeconds} seconds. ${progress}`));
+                };
+
+                xhr.onabort = () => {
+                    delete activeUploads.value[key];
+                    delete activeUploadProgress.value[key];
+                    reject(new Error('Supabase upload was cancelled.'));
+                };
+
+                xhr.send(file);
+            });
+
+        const abortActiveUploads = () => {
+            Object.values(activeUploads.value || {}).forEach(xhr => xhr.abort());
+            activeUploads.value = {};
+            activeUploadProgress.value = {};
+        };
+
+        const formatUploadProgressForError = key => {
+            const progress = activeUploadProgress.value?.[key];
+            if (!progress) return '';
+            return `Last progress: ${Math.round(progress.percentage)}% (${formatBytes(progress.loaded)} of ${formatBytes(
+                progress.total
+            )}).`;
+        };
+
+        const createSupabaseObjectUrl = (bucket, path) => {
+            const supabaseUrl = String(props.content.supabaseUrl || '').trim().replace(/\/+$/, '');
+            return `${supabaseUrl}/storage/v1/object/${encodeURIComponent(bucket)}/${encodeStoragePath(path)}`;
+        };
+
+        const createStoragePath = file => {
+            const folder = cleanPath(props.content.supabasePath || '');
+            const fileName = props.content.useOriginalFileName
+                ? sanitizeFileName(file.name)
+                : createUniqueFileName(file.name);
+            return folder ? `${folder}/${fileName}` : fileName;
+        };
+
+        const createUniqueFileName = name => {
+            const cleanName = sanitizeFileName(name);
+            const dotIndex = cleanName.lastIndexOf('.');
+            const baseName = dotIndex > 0 ? cleanName.slice(0, dotIndex) : cleanName;
+            const extension = dotIndex > 0 ? cleanName.slice(dotIndex) : '';
+            return `${baseName}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${extension}`;
+        };
+
+        const sanitizeFileName = name =>
+            String(name || 'file')
+                .trim()
+                .replace(/[/\\?%*:|"<>]/g, '-')
+                .replace(/\s+/g, '-')
+                .replace(/-+/g, '-');
+
+        const cleanPath = path =>
+            String(path || '')
+                .trim()
+                .replace(/^\/+|\/+$/g, '')
+                .split('/')
+                .map(segment => sanitizeFileName(segment))
+                .filter(Boolean)
+                .join('/');
+
+        const getPublicUrl = (bucket, path) => {
+            const supabaseUrl = String(props.content.supabaseUrl || '').trim().replace(/\/+$/, '');
+            return `${supabaseUrl}/storage/v1/object/public/${encodeURIComponent(bucket)}/${encodeStoragePath(path)}`;
+        };
+
+        const encodeStoragePath = path =>
+            String(path)
+                .split('/')
+                .map(segment => encodeURIComponent(segment))
+                .join('/');
+
+        const toNonNegativeNumber = (value, fallback) => {
+            const number = Number(value);
+            return Number.isFinite(number) && number >= 0 ? number : fallback;
+        };
+
+        const formatBytes = bytes => {
+            if (!Number.isFinite(bytes)) return '';
+            if (bytes === 0) return '0 B';
+            const units = ['B', 'KB', 'MB', 'GB'];
+            const sizeIndex = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+            const value = bytes / 1024 ** sizeIndex;
+            return `${value.toFixed(value >= 10 || sizeIndex === 0 ? 0 : 1)} ${units[sizeIndex]}`;
+        };
+
+        onBeforeUnmount(() => {
+            abortActiveUploads();
+        });
+
         const removeFile = index => {
             if (isDisabled.value || isReadonly.value) return;
 
             const updatedFiles = [...files.value.filter((_, i) => i !== index)];
             setFiles(updatedFiles);
+            pruneStatus(updatedFiles);
 
-            emit('trigger-event', {
-                name: 'change',
-                event: { value: updatedFiles },
-            });
+            emitChange(updatedFiles);
         };
 
         const reorderFiles = (fromIndex, toIndex) => {
@@ -601,14 +930,15 @@ export default {
             newFiles.splice(toIndex, 0, movedItem);
             setFiles(newFiles);
 
-            emit('trigger-event', {
-                name: 'change',
-                event: { value: newFiles },
-            });
+            emitChange(newFiles);
         };
 
         const clearFiles = () => {
+            abortActiveUploads();
+            isUploading.value = false;
             setFiles([]);
+            setStatus({});
+            emitChange([]);
         };
 
         const getAllowedTypesLabel = () => {
@@ -642,6 +972,11 @@ export default {
                 method: clearFiles,
                 editor: { label: 'Clear Files', group: 'File Upload', icon: 'trash' },
             },
+            startUploading: {
+                description: 'Upload pending files to Supabase',
+                method: startUploading,
+                editor: { label: 'Start Uploading', group: 'File Upload', icon: 'upload' },
+            },
         });
 
         watch(
@@ -668,9 +1003,17 @@ export default {
             { immediate: true }
         );
 
-        // Connect drag animation handlers
-        const handleDragOver = animationHandleDragOver;
-        const handleDragLeave = animationHandleDragLeave;
+        // Connect drag animation handlers without blocking WeWeb editor canvas drags.
+        const handleDragOver = event => {
+            if (isDisabled.value || isReadonly.value || !drop.value || isEditing.value) return;
+            event.preventDefault();
+            animationHandleDragOver(event);
+        };
+        const handleDragLeave = event => {
+            if (isDisabled.value || isReadonly.value || !drop.value || isEditing.value) return;
+            event.preventDefault();
+            animationHandleDragLeave(event);
+        };
         const handleMouseMove = animationHandleMouseMove;
 
         return {
@@ -745,9 +1088,11 @@ export default {
             targetY,
             isAnimating,
             isProcessing,
+            isUploading,
             isEditing,
 
             clearFiles,
+            startUploading,
 
             /* wwEditor:start */
             selectParentElement,

@@ -1,12 +1,12 @@
 {
-    "name": "ww-input-file",
+    "name": "ww-supabase-input-file",
     "repository": {
         "type": "git",
-        "url": "https://github.com/weweb-assets/ww-input-file"
+        "url": "https://github.com/HishamRashwan/ww-input-file"
     },
-    "version": "3.3.0",
+    "version": "3.3.1",
     "scripts": {
-        "build": "weweb build",
+        "build": "weweb build name=supabase-file-upload type=wwobject",
         "serve": "weweb serve"
     },
     "devDependencies": {
